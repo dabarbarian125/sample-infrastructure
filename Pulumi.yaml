@@ -1,0 +1,10 @@
+name: sample-project-infrastructure
+description: This will define the backend infrastructure for hosting my sample app.
+runtime:
+  name: nodejs
+  options:
+    packagemanager: npm
+config:
+  pulumi:tags:
+    value:
+      pulumi:template: aws-typescript

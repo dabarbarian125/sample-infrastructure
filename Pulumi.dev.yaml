@@ -1,0 +1,8 @@
+encryptionsalt: v1:GZKsjGWIwHQ=:v1:jDROqpjf/ReD58x2:Zz5L+HxtIJfscRmwsl6rfQt0uoeSOw==
+config:
+  aws:region: us-east-1
+  sample-project-infrastructure:dbUsername: dbuser
+  sample-project-infrastructure:dbPassword:
+    secure: v1:Sz3SbJqtuV6vh3rf:fmifqbS61VUpTf66Lp33M4eODciv/3gwyKbc7yi2LVk3T3j3qw4=
+  sample-project-infrastructure:awsAccountId:
+    secure: v1:pmk4UayXQZ6XBGBp:yzGZLfjyy6ladClfORmyAgJUGDM6JHrNWd4WyA==
