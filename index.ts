@@ -15,6 +15,8 @@ const callbackUrls = ["https://localhost:3000/auth/callback"]; // Replace with y
 const logoutUrls = ["https://localhost:3000/logout"]; // Replace with your application's logout URLs
 const awsAccountId = config.requireSecret("awsAccountId");
 
+/* Cognito Configuration */
+
 // Cognito User Pool with Email Verification Only
 const userPool = new aws.cognito.UserPool(`${projectName}-userPool`, {
     autoVerifiedAttributes: ["email"], 
@@ -47,12 +49,12 @@ const userPoolDomain = new aws.cognito.UserPoolDomain(`${projectName}-userPoolDo
 // User Pool Client with Hosted UI Configuration
 const userPoolClient = new aws.cognito.UserPoolClient(`${projectName}-userPoolClient`, {
     userPoolId: userPool.id,
-    generateSecret: false, // Disable secrets for public clients
+    generateSecret: false, 
     allowedOauthFlowsUserPoolClient: true,
     allowedOauthFlows: ["code", "implicit"], // Enable OAuth 2.0 flows
     allowedOauthScopes: ["openid", "profile", "email"], // Define OAuth scopes
-    callbackUrls: callbackUrls, // URLs for redirect after login
-    logoutUrls: logoutUrls, // URLs for redirect after logout
+    callbackUrls: callbackUrls, 
+    logoutUrls: logoutUrls, 
     explicitAuthFlows: [
         "ALLOW_USER_PASSWORD_AUTH",
         "ALLOW_REFRESH_TOKEN_AUTH",
@@ -60,6 +62,10 @@ const userPoolClient = new aws.cognito.UserPoolClient(`${projectName}-userPoolCl
     ],
   
 });
+
+/* EventBridge Configuration */
+
+
 // Create an S3 Bucket for CloudTrail Logs
 const trailBucket = new aws.s3.Bucket(`${projectName}-cloudtrail-logs`, {
     acl: "private",
@@ -118,7 +124,7 @@ const bucketPolicy = new aws.s3.BucketPolicy(`${projectName}-trail-bucket-policy
 // Create the CloudTrail Trail
 const trail = new aws.cloudtrail.Trail(`${projectName}-trail`, {
     s3BucketName: trailBucket.id,
-    includeGlobalServiceEvents: false, // Captures global events
+    includeGlobalServiceEvents: true, // Captures global events
     enableLogFileValidation: true,
     isMultiRegionTrail: false, // Captures events across all regions
     eventSelectors: [
@@ -141,15 +147,83 @@ const userConfirmationRule = new aws.cloudwatch.EventRule(`${projectName}-userCo
     }),
 });
 
+/* Network Configuration */
 
 // Retrieve the default VPC and its subnets
 const defaultVpc = aws.ec2.getVpc({ default: true });
+
+const defaultVpcId = defaultVpc.then(vpc => vpc.id);
+
+// Default subnets, all private
 const defaultSubnets = defaultVpc.then(vpc =>
     aws.ec2.getSubnets({
         filters: [{ name: "vpc-id", values: [vpc.id] }], 
     })
 );
 
+
+// Public subnets
+const publicSubnet1 = new aws.ec2.Subnet("publicSubnet1", {
+    vpcId: defaultVpcId,
+    cidrBlock: "172.31.96.0/20", 
+    mapPublicIpOnLaunch: true, 
+    availabilityZone: "us-east-1a", 
+    tags: { Name: "Public Subnet 1" },
+});
+
+
+const publicSubnet2 = new aws.ec2.Subnet("publicSubnet2", {
+    vpcId: defaultVpcId,
+    cidrBlock: "172.31.146.0/23", 
+    mapPublicIpOnLaunch: true, 
+    availabilityZone: "us-east-1b", 
+    tags: { Name: "Public Subnet 2" },
+});
+
+const natGatewayEip = new aws.ec2.Eip("natGatewayEip", { vpc: true });
+
+const natGateway = new aws.ec2.NatGateway("natGateway", {
+    subnetId: publicSubnet1.id,
+    allocationId: natGatewayEip.id,
+});
+
+
+const privateRouteTable = new aws.ec2.RouteTable("privateRouteTable", {
+    vpcId: defaultVpcId,
+    routes: [
+        {
+            cidrBlock: "0.0.0.0/0",
+            natGatewayId: natGateway.id,
+        },
+    ],
+});
+
+// Private subnets
+const privateSubnet1 = new aws.ec2.Subnet("privateSubnet1", {
+    vpcId: defaultVpcId,
+    cidrBlock: "172.31.112.0/21",
+    availabilityZone: "us-east-1a",
+    tags: { Name: "Private Subnet 1" },
+});
+
+const privateSubnet2 = new aws.ec2.Subnet("privateSubnet2", {
+    vpcId: defaultVpcId,
+    cidrBlock: "172.31.128.0/21",
+    availabilityZone: "us-east-1b",
+    tags: { Name: "Private Subnet 2" },
+});
+
+
+// Associate the route table with the private subnets
+new aws.ec2.RouteTableAssociation("privateSubnet1RouteTableAssoc", {
+    subnetId: privateSubnet1.id,
+    routeTableId: privateRouteTable.id,
+});
+
+new aws.ec2.RouteTableAssociation("privateSubnet2RouteTableAssoc", {
+    subnetId: privateSubnet2.id,
+    routeTableId: privateRouteTable.id,
+});
 
 // RDS Security Group
 const rdsSecurityGroup = new aws.ec2.SecurityGroup(`${projectName}-rds-sg`, {
@@ -193,7 +267,7 @@ const rdsSubnetGroup = new aws.rds.SubnetGroup(`${projectName}-rds-subnet-group`
 
 
 
-
+/* RDS Configuration */
 
 
 // Provision the PostgreSQL Database
@@ -211,6 +285,8 @@ const dbInstance = new aws.rds.Instance(`${projectName}-postgresinstance`, {
     publiclyAccessible: true, // For testing purposes; disable in production
 });
 
+
+/* Lambda Configuration */
 
 // Lambda Role
 const lambdaRole = new aws.iam.Role(`${projectName}-lambdaRole`, {
@@ -380,12 +456,331 @@ new aws.lambda.Permission(`${projectName}-invokeAddUserToDbPermission`, {
     sourceAccount: awsAccountId, 
 });
 
+/*
+Front end and backend cluster configuration
+*/
 
+// Create ECR repositories
+const frontendRepo = new aws.ecr.Repository("frontend-repo", {
+    name: "frontend-repo", 
+});
+
+const backendRepo = new aws.ecr.Repository("backend-repo", {
+    name: "backend-repo", 
+});
+
+// Create an ECS Cluster
+const cluster = new aws.ecs.Cluster("sampleProjectCluster");
+
+
+// Task Execution Role
+const executionRole = new aws.iam.Role("executionRole", {
+    assumeRolePolicy: aws.iam.assumeRolePolicyForPrincipal({ Service: "ecs-tasks.amazonaws.com" }),
+});
+
+new aws.iam.RolePolicyAttachment("executionRolePolicy", {
+    role: executionRole.name,
+    policyArn: aws.iam.ManagedPolicy.AmazonECSTaskExecutionRolePolicy,
+});
+
+// Task Role
+const taskRole = new aws.iam.Role("taskRole", {
+    assumeRolePolicy: aws.iam.assumeRolePolicyForPrincipal({ Service: "ecs-tasks.amazonaws.com" }),
+});
+
+// Variables for launch
+const cognitoAuthorityUrl = pulumi.interpolate`https://${userPoolDomain.domain}.auth.${aws.config.region}.amazoncognito.com`;
+const dbInstanceEndpoint = dbInstance.endpoint.apply(endpoint => endpoint.split(":")[0])
+const cognitoClientId = userPoolClient.id;
+const cognitoUserPoolId = userPool.id;
+
+const logGroup = new aws.cloudwatch.LogGroup("ecsLogGroup", {
+    retentionInDays: 7, 
+});
+
+
+
+
+
+const logPolicy = new aws.iam.Policy("logPolicy", {
+    policy: pulumi.interpolate`{
+        "Version": "2012-10-17",
+        "Statement": [
+            {
+                "Effect": "Allow",
+                "Action": [
+                    "logs:CreateLogStream",
+                    "logs:PutLogEvents"
+                ],
+                "Resource": "arn:aws:logs:${aws.config.region}:${awsAccountId}:log-group:${logGroup.name}:*"
+            }
+        ]
+    }`
+});
+
+new aws.iam.RolePolicyAttachment("executionRoleLogPolicy", {
+    role: executionRole.name,
+    policyArn: logPolicy.arn,
+});
+
+
+/* Load Balancer */
+
+// ALB Security Group
+const albSecurityGroup = new aws.ec2.SecurityGroup("albSecurityGroup", {
+    vpcId: defaultVpcId,
+    ingress: [
+        {
+            protocol: "tcp",
+            fromPort: 80,
+            toPort: 80,
+            cidrBlocks: ["0.0.0.0/0"],
+        },
+    ],
+    egress: [
+        {
+            protocol: "-1",
+            fromPort: 0,
+            toPort: 0,
+            cidrBlocks: ["0.0.0.0/0"],
+            description: "Allow all outbound traffic",
+        },
+    ],
+});
+
+
+
+// Create the ALB
+const alb = new aws.lb.LoadBalancer("appLoadBalancer", {
+    securityGroups: [albSecurityGroup.id],
+    subnets: [publicSubnet1.id, publicSubnet2.id], 
+});
+
+// Frontend Target Group
+const frontendTargetGroup = new aws.lb.TargetGroup("frontendTargetGroup", {
+    port: 3000,
+    protocol: "HTTP",
+    targetType: "ip", 
+    vpcId: defaultVpcId,
+    healthCheck: {
+        path: "/", // Adjust the path as per your frontend application's health endpoint
+        interval: 60,
+        timeout: 40,
+        healthyThreshold: 5,
+        unhealthyThreshold: 2,
+        matcher: "200", // Expected HTTP response code
+    },
+});
+
+// Backend Target Group
+const backendTargetGroup = new aws.lb.TargetGroup("backendTargetGroup", {
+    port: 3000,
+    protocol: "HTTP",
+    targetType: "ip", 
+    vpcId: defaultVpcId,
+    healthCheck: {
+        path: "/api/users",
+    },
+});
+
+// HTTP Listener
+const httpListener = new aws.lb.Listener("httpListener", {
+    loadBalancerArn: alb.arn,
+    port: 80,
+    protocol: "HTTP",
+    defaultActions: [
+        {
+            type: "forward",
+            targetGroupArn: frontendTargetGroup.arn,
+        },
+    ],
+});
+
+// Backend Listener Rule
+const backendListenerRule = new aws.lb.ListenerRule("backendListenerRule", {
+    listenerArn: httpListener.arn,
+    priority: 10, 
+    actions: [
+        {
+            type: "forward",
+            targetGroupArn: backendTargetGroup.arn,
+        },
+    ],
+    conditions: [
+        {
+            pathPattern: {
+                values: ["/api/*"], 
+            },
+        },
+    ],
+});
+
+// WebSocket Listener Rule
+const websocketListenerRule = new aws.lb.ListenerRule("websocketListenerRule", {
+    listenerArn: httpListener.arn,
+    priority: 20, // Ensure this priority is unique and higher than other rules
+    actions: [
+        {
+            type: "forward",
+            targetGroupArn: backendTargetGroup.arn,
+        },
+    ],
+    conditions: [
+        {
+            pathPattern: {
+                values: ["/ws/*"],
+            },
+        },
+    ],
+});
+
+const albDnsName = alb.dnsName;
+const domainName = "sampleproject.click";
+
+const backendTaskDefinition = new aws.ecs.TaskDefinition("backendTaskDefinition", {
+    family: "backendTaskDefinition",
+    networkMode: "awsvpc",
+    requiresCompatibilities: ["FARGATE"],
+    cpu: "256",
+    memory: "512",
+    taskRoleArn: taskRole.arn,
+    executionRoleArn: executionRole.arn,
+    containerDefinitions: pulumi.interpolate`[
+        {
+            "name": "backend",
+            "image": "${backendRepo.repositoryUrl}:latest",
+            "essential": true,
+            "portMappings": [
+                { "containerPort": 3000, "protocol": "tcp"  }
+            ],
+            "environment": [
+                { "name": "DB_HOST", "value": "${dbInstanceEndpoint}" },
+                { "name": "DB_PASSWORD", "value": "${dbPassword}" },
+                { "name": "FRONT_END_URL", "value": "http://${albDnsName}" }
+            ],
+            "logConfiguration": {
+                "logDriver": "awslogs",
+                "options": {
+                    "awslogs-group": "${logGroup.name}",
+                    "awslogs-region": "${aws.config.region}",
+                    "awslogs-stream-prefix": "backend" 
+                }
+            }
+        }
+    ]`,
+});
+
+
+const ecsInstanceSecurityGroup = new aws.ec2.SecurityGroup("ecsInstanceSecurityGroup", {
+    vpcId: defaultVpcId,
+    ingress: [
+        {
+            protocol: "-1",
+            fromPort: 0,
+            toPort: 0,
+            securityGroups: [rdsSecurityGroup.id],
+        },
+       
+    ],
+    egress: [
+        {
+            protocol: "-1",
+            fromPort: 0,
+            toPort: 0,
+            cidrBlocks: ["0.0.0.0/0"],
+        },
+    ],
+});
+
+// Update the RDS security group to allow traffic from the ECS security group
+rdsSecurityGroup.ingress.apply(ingress => [
+    ...ingress,
+    {
+        protocol: "tcp",
+        fromPort: 5432,
+        toPort: 5432,
+        securityGroups: [ecsInstanceSecurityGroup.id], // Reference RDS security group
+    },
+]);
+
+const frontendTaskDefinition = new aws.ecs.TaskDefinition("frontendTaskDefinition", {
+    family: "frontendTaskDefinition",
+    networkMode: "awsvpc",
+    requiresCompatibilities: ["FARGATE"],
+    cpu: "256",
+    memory: "512",
+    taskRoleArn: taskRole.arn,
+    executionRoleArn: executionRole.arn,
+    containerDefinitions: pulumi.interpolate`[
+        {
+            "name": "frontend",
+            "image": "${frontendRepo.repositoryUrl}:latest",
+            "essential": true,
+            "portMappings": [
+                { "containerPort": 3000, "protocol": "tcp" }
+            ],
+            "environment": [
+                { "name": "REACT_APP_WEBSOCKET_URL", "value": "ws://${albDnsName}/ws" },
+                { "name": "REACT_APP_API_URL", "value": "http://${albDnsName}/api" },
+                { "name": "REACT_APP_MY_IP", "value": "http://${albDnsName}" },
+                { "name": "REACT_APP_COGNITO_CLIENT_ID", "value": "${cognitoClientId}" },
+                { "name": "REACT_APP_COGNITO_AUTHORITY_URL", "value": "${cognitoAuthorityUrl}" },
+                { "name": "REACT_APP_COGNITO_USER_POOL_ID", "value": "${cognitoUserPoolId}" }
+            ],
+            "logConfiguration": {
+                "logDriver": "awslogs",
+                "options": {
+                    "awslogs-group": "${logGroup.name}",
+                    "awslogs-region": "${aws.config.region}",
+                    "awslogs-stream-prefix": "frontend" 
+                }
+            }
+        }
+    ]`,
+});
+
+
+// Frontend Service
+const frontendService = new aws.ecs.Service("frontendService", {
+    cluster: cluster.arn,
+    taskDefinition: frontendTaskDefinition.arn,
+    desiredCount: 2,
+    launchType: "FARGATE",
+    networkConfiguration: {
+        assignPublicIp: true, 
+        subnets: [publicSubnet1.id, publicSubnet2.id],
+        securityGroups: [ecsInstanceSecurityGroup.id],
+    },
+    loadBalancers: [{
+        targetGroupArn: frontendTargetGroup.arn,
+        containerName: "frontend",
+        containerPort: 3000,
+    }],
+    forceNewDeployment: true
+});
+
+// Backend Service
+const backendService = new aws.ecs.Service("backendService", {
+    cluster: cluster.arn,
+    taskDefinition: backendTaskDefinition.arn,
+    desiredCount: 2,
+    launchType: "FARGATE",
+    networkConfiguration: {
+        assignPublicIp: true, 
+        subnets: [publicSubnet1.id, publicSubnet2.id],
+        securityGroups: [ecsInstanceSecurityGroup.id],
+    },
+    loadBalancers: [{
+        targetGroupArn: backendTargetGroup.arn,
+        containerName: "backend",
+        containerPort: 3000,
+    }],
+    forceNewDeployment: true
+});
 
 
 
 // Export Outputs
-export const cognitoUserPoolId = userPool.id;
 export const cognitoUserPoolClientId = userPoolClient.id;
 export const cognitoHostedUiUrl = pulumi.interpolate`https://${userPoolDomain.domain}.auth.${aws.config.region}.amazoncognito.com/login?client_id=${userPoolClient.id}&response_type=code&scope=openid+profile+email&redirect_uri=${callbackUrls[0]}`;
 export const rdsEndpoint = dbInstance.endpoint;
@@ -394,3 +789,5 @@ export const eventRuleName = userConfirmationRule.name;
 export const trailArn = trail.arn;
 export const trailBucketName = trailBucket.bucket;
 export const fetchCognitoUserLambdaArn = fetchCognitoUserLambda.arn;
+export const frontendRepoUrl = frontendRepo.repositoryUrl;
+export const backendRepoUrl = backendRepo.repositoryUrl;
